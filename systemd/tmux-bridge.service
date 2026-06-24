@@ -1,0 +1,35 @@
+[Unit]
+Description=tmux-bridge pairing and session daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=kodba
+Group=kodba
+ExecStart=/usr/bin/python3 /opt/tmux-bridge/tmux-bridge.py daemon
+Restart=on-failure
+RestartSec=2
+
+# /run/tmux-bridge (admin socket) and /var/lib/tmux-bridge (state) owned by kodba
+RuntimeDirectory=tmux-bridge
+RuntimeDirectoryMode=0750
+StateDirectory=tmux-bridge
+StateDirectoryMode=0750
+
+Environment=TMUX_BRIDGE_CONFIG=/etc/tmux-bridge/config.json
+Environment=TMUX_BRIDGE_STATE=/var/lib/tmux-bridge
+Environment=TMUX_BRIDGE_RUNTIME=/run/tmux-bridge
+
+# Hardening (PrivateTmp=no and ProtectHome=no on purpose — the daemon
+# spawns the user's tmux server (socket in /tmp/tmux-<uid>) and claude needs
+# write access to ~/.claude under /home/kodba).
+NoNewPrivileges=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target
