@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import secrets
+import signal
 import socket
 import socketserver
 import subprocess
@@ -118,22 +119,99 @@ def tmux_list_sessions() -> list[dict]:
     return sessions
 
 
-def tmux_create_session(name: str) -> tuple[bool, str]:
+def _default_cwd() -> str:
+    return os.environ.get("TMUX_BRIDGE_DEFAULT_CWD") or os.environ.get("HOME") or "/"
+
+
+def tmux_create_session(name: str, cwd: str | None = None) -> tuple[bool, str]:
     full = session_full_name(name)
+    target_cwd = cwd or _default_cwd()
+    if not target_cwd.startswith("/"):
+        return False, "cwd must be an absolute path"
+    if not os.path.isdir(target_cwd):
+        return False, f"cwd '{target_cwd}' does not exist or is not a directory"
     rc, _, err = _tmux("has-session", "-t", full)
     if rc == 0:
         return False, f"session '{full}' already exists"
-    rc, _, err = _tmux("new-session", "-d", "-s", full, str(SUPERVISOR))
+    rc, _, err = _tmux("new-session", "-d", "-s", full, "-c", target_cwd,
+                       "-e", f"TMUX_BRIDGE_SESSION_NAME={full}",
+                       str(SUPERVISOR))
     if rc != 0:
         return False, err.strip() or "tmux new-session failed"
     return True, full
 
 
-def tmux_kill_session(name: str) -> tuple[bool, str]:
-    full = session_full_name(name)
-    rc, _, err = _tmux("kill-session", "-t", full)
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except (ProcessLookupError, PermissionError, OSError):
+        return False
+
+
+def _session_pids(full: str) -> tuple[int | None, int | None]:
+    """Return (supervisor_bash_pid, claude_pid) for a tmux session."""
+    rc, out, _ = _tmux("display", "-t", full, "-p", "#{pane_pid}")
     if rc != 0:
-        return False, err.strip() or "tmux kill-session failed"
+        return None, None
+    out = out.strip()
+    if not out.isdigit():
+        return None, None
+    bash_pid = int(out)
+    claude_pid = None
+    try:
+        p = subprocess.run(
+            ["pgrep", "-P", str(bash_pid), "-x", "claude"],
+            capture_output=True, text=True, timeout=2,
+        )
+        for line in p.stdout.split():
+            if line.isdigit():
+                claude_pid = int(line)
+                break
+    except (subprocess.SubprocessError, OSError):
+        pass
+    return bash_pid, claude_pid
+
+
+def tmux_kill_session(name: str) -> tuple[bool, str]:
+    """Graceful shutdown:
+       1. SIGTERM supervisor so its restart loop stops after claude exits.
+       2. SIGINT claude so it can deregister from Anthropic's session cloud.
+       3. Wait briefly for claude to exit; escalate SIGTERM then SIGKILL.
+       4. tmux kill-session as a cleanup catch-all (idempotent).
+    """
+    full = session_full_name(name)
+    rc, _, _ = _tmux("has-session", "-t", full)
+    if rc != 0:
+        return False, "no such session"
+
+    bash_pid, claude_pid = _session_pids(full)
+
+    if bash_pid:
+        try: os.kill(bash_pid, signal.SIGTERM)
+        except ProcessLookupError: pass
+
+    if claude_pid:
+        try: os.kill(claude_pid, signal.SIGINT)
+        except ProcessLookupError: pass
+        # Wait up to ~3s for graceful exit (so claude can deregister).
+        deadline = time.time() + 3.0
+        while time.time() < deadline and _pid_alive(claude_pid):
+            time.sleep(0.1)
+        # Escalate if needed.
+        if _pid_alive(claude_pid):
+            try: os.kill(claude_pid, signal.SIGTERM)
+            except ProcessLookupError: pass
+            deadline = time.time() + 2.0
+            while time.time() < deadline and _pid_alive(claude_pid):
+                time.sleep(0.1)
+        if _pid_alive(claude_pid):
+            try: os.kill(claude_pid, signal.SIGKILL)
+            except ProcessLookupError: pass
+
+    # Cleanup whatever's left. The supervisor may already have torn the
+    # session down on its own; treat 'no such session' as success here.
+    _tmux("kill-session", "-t", full)
     return True, full
 
 
@@ -297,10 +375,13 @@ class APIHandler(BaseHTTPRequestHandler):
         name = (body.get("name") or "").strip()
         if not name or not all(c.isalnum() or c in "-_" for c in name):
             return self._json(400, {"error": "name must be alphanumeric/-/_"})
-        ok, info = tmux_create_session(name)
+        cwd = body.get("cwd")
+        if cwd is not None and not isinstance(cwd, str):
+            return self._json(400, {"error": "cwd must be a string"})
+        ok, info = tmux_create_session(name, cwd=cwd)
         if not ok:
             return self._json(409, {"error": info})
-        return self._json(201, {"name": info})
+        return self._json(201, {"name": info, "cwd": cwd or _default_cwd()})
 
     def _sessions_delete(self, name: str):
         if not self._authed_device():

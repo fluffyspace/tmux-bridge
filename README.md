@@ -27,8 +27,16 @@ you want is to tell your headless server "spawn a new agent session named
   a 6-digit code, you type `tmux-bridge pair 384291` on the box. That's it.
 - Sessions are normal `tmux` sessions on the user's tmux server, so you can
   still `ssh in && tmux attach -t <name>` and take over the agent yourself.
+- The tmux session name is passed straight through as the
+  `claude --remote-control <name>` argument, so it's also the label that
+  shows in the official Claude mobile app's Code section — one name
+  everywhere.
 - `claude` inside each session is supervised: if it exits (crash, `/exit`,
   whatever), it's restarted with exponential backoff.
+- `DELETE /sessions/<name>` shuts claude down **gracefully** (SIGINT first
+  so it can deregister with Anthropic's cloud, then SIGTERM/SIGKILL
+  escalation, then `tmux kill-session` as a catch-all). Skips ghost
+  "connected" entries in the mobile app's archived list.
 - Zero third-party Python dependencies. Stdlib only.
 
 ## How it works
@@ -71,8 +79,8 @@ All session endpoints require `Authorization: Bearer <token>`.
 | `POST` | `/pair`                | no  | `{"device_name": "phone"}` → `{request_id, pairing_code}` |
 | `GET`  | `/pair/<request_id>`   | no  | poll for approval; returns `token` once and only once |
 | `GET`  | `/sessions`            | yes | list tmux sessions |
-| `POST` | `/sessions`            | yes | `{"name": "alphanum-_"}`; full name is `<host>-<name>` |
-| `DELETE` | `/sessions/<name>`   | yes | kill a session (name with or without host prefix) |
+| `POST` | `/sessions`            | yes | `{"name": "alphanum-_", "cwd": "/abs/path"}` — `cwd` optional; full name is `<host>-<name>`; response includes `{name, cwd}` |
+| `DELETE` | `/sessions/<name>`   | yes | graceful kill: SIGINT → wait → SIGTERM → SIGKILL → `tmux kill-session` |
 | `DELETE` | `/devices/self`      | yes | self-unpair (server forgets the token) |
 
 ## Admin CLI
@@ -122,6 +130,25 @@ sudo systemctl enable --now tmux-bridge
   arrives. Handy if the phone shows the code in a place that's awkward to
   hand-type from.
 - `pending_ttl_seconds` — pending requests are pruned after this many seconds.
+
+### Working directory & workspace trust
+
+Each `POST /sessions` can include an optional `cwd` (absolute path). When
+omitted, the daemon falls back to the `TMUX_BRIDGE_DEFAULT_CWD` env var
+(set in the systemd unit) and then to `$HOME`.
+
+⚠️ The chosen folder **must already be in claude's trusted-folders list for
+the user the daemon runs as**, otherwise claude will block on its
+workspace-trust prompt and the session will hang. To trust a folder, do it
+once interactively:
+
+```bash
+sudo -u <daemon-user> -i
+cd /the/folder
+claude   # answer "Yes, I trust this folder", then /exit
+```
+
+Sessions started later in that folder will skip the prompt.
 
 ## Security model — read this
 

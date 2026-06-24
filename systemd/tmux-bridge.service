@@ -5,13 +5,16 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+# Change to the user whose claude install + tmux server you want the daemon
+# to use. The daemon will spawn `claude --remote-control` as this user, so
+# this user must have completed claude's first-run setup (theme, login,
+# workspace trust for at least one folder).
 User=kodba
 Group=kodba
 ExecStart=/usr/bin/python3 /opt/tmux-bridge/tmux-bridge.py daemon
 Restart=on-failure
 RestartSec=2
 
-# /run/tmux-bridge (admin socket) and /var/lib/tmux-bridge (state) owned by kodba
 RuntimeDirectory=tmux-bridge
 RuntimeDirectoryMode=0750
 StateDirectory=tmux-bridge
@@ -20,10 +23,15 @@ StateDirectoryMode=0750
 Environment=TMUX_BRIDGE_CONFIG=/etc/tmux-bridge/config.json
 Environment=TMUX_BRIDGE_STATE=/var/lib/tmux-bridge
 Environment=TMUX_BRIDGE_RUNTIME=/run/tmux-bridge
+# Default folder claude opens in when no `cwd` is given on POST /sessions.
+# Must be a directory that exists AND that the chosen User has already
+# accepted the workspace-trust dialog for (run `claude` interactively there
+# once if not). The mobile/Android client can override per-session.
+#Environment=TMUX_BRIDGE_DEFAULT_CWD=/home/your-user
 
-# Hardening (PrivateTmp=no and ProtectHome=no on purpose — the daemon
-# spawns the user's tmux server (socket in /tmp/tmux-<uid>) and claude needs
-# write access to ~/.claude under /home/kodba).
+# Hardening note: PrivateTmp=no and ProtectHome=no are intentional — the
+# daemon spawns the user's tmux server (socket in /tmp/tmux-<uid>) and
+# claude needs write access to ~/.claude.
 NoNewPrivileges=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
