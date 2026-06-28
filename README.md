@@ -1,17 +1,32 @@
 # tmux-bridge
 
-A small daemon that lets a phone app start, stop and inspect `tmux` sessions on a
-remote Linux box — built specifically to drive
-[Claude Code](https://docs.claude.com/en/docs/claude-code) sessions from an
-Android client over a private network (LAN or VPN).
+**Run Claude Code on your real machine. Drive it from your phone.**
 
-It's the missing back-end for "remote-control your headless dev box from your
-phone": pair once with a 6-digit code shown in the app, and then the phone can
-spin up `tmux` sessions running `claude --remote-control` and tear them down,
-without an Electron desktop in the loop.
+`tmux-bridge` is a tiny, zero-dependency daemon that turns a headless Linux box
+into something you can pair with and steer from your pocket. It spins up
+[Claude Code](https://docs.claude.com/en/docs/claude-code) sessions inside
+`tmux` — each launched as `claude --remote-control <name>`, so you drive the
+actual coding from **Claude's official native apps** (iOS, Android, and the web),
+not a cramped terminal emulator squeezed onto a phone screen. The session name
+you pick is the same label that shows up in the official app's Code section.
 
-> Status: server side is complete and battle-tested locally. The Android client
-> is **work in progress** — this repo contains only the daemon for now.
+The split is the whole point: your beefy dev box (or that rented GPU server) does
+the work and holds the repo, your phone is just the remote. Kick off a
+*refactor-auth* agent while you're on the bus, check on it at lunch, kill it when
+it's done — all over your own private network (LAN, WireGuard, or Tailscale),
+with no Electron desktop in the loop and nothing round-tripping through a cloud
+you don't control. Sessions are ordinary `tmux` sessions, so you can always
+`ssh in && tmux attach` and take the keyboard back.
+
+Pairing is deliberately dead simple: the app shows a 6-digit code, you type
+`tmux-bridge pair 384291` on the box, done.
+
+> **📱 Companion app:**
+> [tmux-bridge-android](https://github.com/fluffyspace/tmux-bridge-android) —
+> a native Jetpack Compose client to pair, browse, spawn and kill sessions.
+>
+> **Status:** the daemon is complete and runs in production under `systemd`; the
+> Android client is live and F-Droid-ready.
 
 ## Why
 
@@ -79,8 +94,10 @@ All session endpoints require `Authorization: Bearer <token>`.
 | `POST` | `/pair`                | no  | `{"device_name": "phone"}` → `{request_id, pairing_code}` |
 | `GET`  | `/pair/<request_id>`   | no  | poll for approval; returns `token` once and only once |
 | `GET`  | `/sessions`            | yes | list tmux sessions |
-| `POST` | `/sessions`            | yes | `{"name": "alphanum-_", "cwd": "/abs/path"}` — `cwd` optional; full name is `<host>-<name>`; response includes `{name, cwd}` |
+| `POST` | `/sessions`            | yes | `{"name": "alphanum-_", "cwd": "/abs/path"}` — both optional; `name` is auto-generated when omitted; `cwd` (alias: `path`) sets the start dir; full name is `<host>-<name>`; response includes `{name, cwd}` |
 | `DELETE` | `/sessions/<name>`   | yes | graceful kill: SIGINT → wait → SIGTERM → SIGKILL → `tmux kill-session` |
+| `GET`  | `/session-paths`       | yes | recently used `cwd`s, most-recent-first (up to 20) |
+| `GET`  | `/check-path?path=…`  | yes | `{"exists": bool, "is_dir": bool}` — validate a path on the server |
 | `DELETE` | `/devices/self`      | yes | self-unpair (server forgets the token) |
 
 ## Admin CLI
@@ -185,8 +202,9 @@ sudo ufw allow from 10.0.0.0/24 to any port 7842 proto tcp comment 'tmux-bridge'
 
 ## Android client
 
-The Android app is being built separately and will land in a sibling repo.
-The expected pairing UX:
+The native Android client lives at
+**[fluffyspace/tmux-bridge-android](https://github.com/fluffyspace/tmux-bridge-android)**
+(Jetpack Compose, F-Droid-ready). The pairing UX:
 
 1. Tap **Add server**, type the server URL (`http://10.0.0.2:7842`).
 2. App POSTs `/pair`, receives a 6-digit code, displays it big.

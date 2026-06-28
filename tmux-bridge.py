@@ -18,14 +18,17 @@ import uuid
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import urlparse, parse_qs
 
 CONFIG_PATH = Path(os.environ.get("TMUX_BRIDGE_CONFIG", "/etc/tmux-bridge/config.json"))
 STATE_DIR = Path(os.environ.get("TMUX_BRIDGE_STATE", "/var/lib/tmux-bridge"))
 RUNTIME_DIR = Path(os.environ.get("TMUX_BRIDGE_RUNTIME", "/run/tmux-bridge"))
 DEVICES_FILE = STATE_DIR / "devices.json"
 PENDING_FILE = STATE_DIR / "pending.json"
+PATH_HISTORY_FILE = STATE_DIR / "path-history.json"
 ADMIN_SOCK = RUNTIME_DIR / "admin.sock"
 SUPERVISOR = Path("/opt/tmux-bridge/claude-supervised.sh")
+PATH_HISTORY_MAX = 20
 
 DEFAULT_CONFIG = {
     "bind": "0.0.0.0",
@@ -75,6 +78,24 @@ def load_pending() -> dict:
 
 def save_pending(pending: dict) -> None:
     _save_json(PENDING_FILE, pending)
+
+
+def load_path_history() -> list:
+    return _load_json(PATH_HISTORY_FILE, [])
+
+
+def save_path_history(paths: list) -> None:
+    _save_json(PATH_HISTORY_FILE, paths)
+
+
+def record_path(path: str) -> None:
+    """Push a used working directory to the front of the recent-paths list."""
+    with _state_lock:
+        history = load_path_history()
+        if path in history:
+            history.remove(path)
+        history.insert(0, path)
+        save_path_history(history[:PATH_HISTORY_MAX])
 
 
 # ---------- tmux ----------
@@ -284,6 +305,10 @@ class APIHandler(BaseHTTPRequestHandler):
             return self._pair_status(self.path[len("/pair/"):])
         if self.path == "/sessions":
             return self._sessions_list()
+        if self.path == "/session-paths":
+            return self._session_paths_list()
+        if self.path.startswith("/check-path"):
+            return self._check_path()
         return self._json(404, {"error": "not found"})
 
     def do_POST(self):
@@ -373,15 +398,41 @@ class APIHandler(BaseHTTPRequestHandler):
         if body is None:
             return self._json(400, {"error": "bad json"})
         name = (body.get("name") or "").strip()
-        if not name or not all(c.isalnum() or c in "-_" for c in name):
+        if name and not all(c.isalnum() or c in "-_" for c in name):
             return self._json(400, {"error": "name must be alphanumeric/-/_"})
+        if not name:
+            name = "ses-" + uuid.uuid4().hex[:8]
+        # Accept "cwd" (canonical) or "path" (Android client) for the start dir.
         cwd = body.get("cwd")
+        if cwd is None:
+            cwd = body.get("path")
         if cwd is not None and not isinstance(cwd, str):
             return self._json(400, {"error": "cwd must be a string"})
+        if isinstance(cwd, str):
+            cwd = cwd.strip() or None
         ok, info = tmux_create_session(name, cwd=cwd)
         if not ok:
             return self._json(409, {"error": info})
+        if cwd:
+            record_path(cwd)
         return self._json(201, {"name": info, "cwd": cwd or _default_cwd()})
+
+    def _session_paths_list(self):
+        if not self._authed_device():
+            return self._json(401, {"error": "unauthorized"})
+        with _state_lock:
+            history = load_path_history()
+        return self._json(200, {"paths": history})
+
+    def _check_path(self):
+        if not self._authed_device():
+            return self._json(401, {"error": "unauthorized"})
+        params = parse_qs(urlparse(self.path).query)
+        path = params.get("path", [""])[0].strip()
+        if not path:
+            return self._json(400, {"error": "path required"})
+        p = Path(path)
+        return self._json(200, {"exists": p.exists(), "is_dir": p.is_dir()})
 
     def _sessions_delete(self, name: str):
         if not self._authed_device():
